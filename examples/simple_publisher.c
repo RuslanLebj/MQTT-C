@@ -1,138 +1,117 @@
-
 /**
  * @file
- * A simple program to that publishes the current time whenever ENTER is pressed.
+ * A simple program that publishes the current time in seconds and microseconds whenever ENTER is pressed.
  */
+
+#include <sys/time.h> // For precise timestamping
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
-
 #include <mqtt.h>
 #include "templates/posix_sockets.h"
 
-
 /**
- * @brief The function that would be called whenever a PUBLISH is received.
+ * @brief Callback function triggered when a PUBLISH message is received.
  *
- * @note This function is not used in this example.
+ * @note Not used in this example.
  */
 void publish_callback(void** unused, struct mqtt_response_publish *published);
 
 /**
- * @brief The client's refresher. This function triggers back-end routines to
- *        handle ingress/egress traffic to the broker.
+ * @brief Client refresher to handle incoming and outgoing traffic to/from the broker.
  *
- * @note All this function needs to do is call \ref __mqtt_recv and
- *       \ref __mqtt_send every so often. I've picked 100 ms meaning that
- *       client ingress/egress traffic will be handled every 100 ms.
+ * @note Runs continuously in a separate thread to call mqtt_sync() every 100 ms.
  */
 void* client_refresher(void* client);
 
 /**
- * @brief Safelty closes the \p sockfd and cancels the \p client_daemon before \c exit.
+ * @brief Safely closes the socket and cancels the client refresher thread before exiting.
  */
 void exit_example(int status, int sockfd, pthread_t *client_daemon);
 
 /**
- * A simple program to that publishes the current time whenever ENTER is pressed.
+ * @brief Main function to connect to the MQTT broker and publish messages.
  */
 int main(int argc, const char *argv[])
 {
-    const char* addr;
-    const char* port;
-    const char* topic;
+    const char* addr;  // Broker address
+    const char* port;  // Broker port
+    const char* topic; // Topic to publish to
 
-    /* get address (argv[1] if present) */
-    if (argc > 1) {
-        addr = argv[1];
-    } else {
-        addr = "test.mosquitto.org";
-    }
+    // Get broker address from command line arguments or use the default
+    addr = (argc > 1) ? argv[1] : "test.mosquitto.org";
 
-    /* get port number (argv[2] if present) */
-    if (argc > 2) {
-        port = argv[2];
-    } else {
-        port = "1883";
-    }
+    // Get port from command line arguments or use the default
+    port = (argc > 2) ? argv[2] : "1883";
 
-    /* get the topic name to publish */
-    if (argc > 3) {
-        topic = argv[3];
-    } else {
-        topic = "datetime";
-    }
+    // Get topic name from command line arguments or use the default
+    topic = (argc > 3) ? argv[3] : "datetime";
 
-    /* open the non-blocking TCP socket (connecting to the broker) */
+    // Open a non-blocking socket to connect to the broker
     int sockfd = open_nb_socket(addr, port);
-
     if (sockfd == -1) {
         perror("Failed to open socket: ");
         exit_example(EXIT_FAILURE, sockfd, NULL);
     }
 
-    /* setup a client */
+    // Initialize MQTT client
     struct mqtt_client client;
-    uint8_t sendbuf[2048]; /* sendbuf should be large enough to hold multiple whole mqtt messages */
-    uint8_t recvbuf[1024]; /* recvbuf should be large enough any whole mqtt message expected to be received */
+    uint8_t sendbuf[2048]; // Buffer for outgoing messages
+    uint8_t recvbuf[1024]; // Buffer for incoming messages
     mqtt_init(&client, sockfd, sendbuf, sizeof(sendbuf), recvbuf, sizeof(recvbuf), publish_callback);
-    /* Create an anonymous session */
+
+    // Connect to the broker with clean session flag
     const char* client_id = NULL;
-    /* Ensure we have a clean session */
     uint8_t connect_flags = MQTT_CONNECT_CLEAN_SESSION;
-    /* Send connection request to the broker. */
     mqtt_connect(&client, client_id, NULL, NULL, 0, NULL, NULL, connect_flags, 400);
 
-    /* check that we don't have any errors */
+    // Check for connection errors
     if (client.error != MQTT_OK) {
         fprintf(stderr, "error: %s\n", mqtt_error_str(client.error));
         exit_example(EXIT_FAILURE, sockfd, NULL);
     }
 
-    /* start a thread to refresh the client (handle egress and ingree client traffic) */
+    // Start a thread to handle MQTT client traffic
     pthread_t client_daemon;
-    if(pthread_create(&client_daemon, NULL, client_refresher, &client)) {
+    if (pthread_create(&client_daemon, NULL, client_refresher, &client)) {
         fprintf(stderr, "Failed to start client daemon.\n");
         exit_example(EXIT_FAILURE, sockfd, NULL);
-
     }
 
-    /* start publishing the time */
+    // Prompt user for input to publish messages
     printf("%s is ready to begin publishing the time.\n", argv[0]);
     printf("Press ENTER to publish the current time.\n");
     printf("Press CTRL-D (or any other key) to exit.\n\n");
-    while(fgetc(stdin) == '\n') {
-        /* get the current time */
-        time_t timer;
-        time(&timer);
-        struct tm* tm_info = localtime(&timer);
-        char timebuf[26];
-        strftime(timebuf, 26, "%Y-%m-%d %H:%M:%S", tm_info);
 
-        /* print a message */
+    // Publish messages on ENTER press
+    while (fgetc(stdin) == '\n') {
+        struct timeval tv;
+        gettimeofday(&tv, NULL); // Get current time in seconds and microseconds
         char application_message[256];
-        snprintf(application_message, sizeof(application_message), "The time is %s", timebuf);
-        printf("%s published : \"%s\"", argv[0], application_message);
+        snprintf(application_message, sizeof(application_message), "%ld.%06ld", tv.tv_sec, tv.tv_usec);
+        printf("%s published: \"%s\"\n", argv[0], application_message);
 
-        /* publish the time */
         mqtt_publish(&client, topic, application_message, strlen(application_message) + 1, MQTT_PUBLISH_QOS_0);
 
-        /* check for errors */
+        // Check for publishing errors
         if (client.error != MQTT_OK) {
             fprintf(stderr, "error: %s\n", mqtt_error_str(client.error));
             exit_example(EXIT_FAILURE, sockfd, &client_daemon);
         }
     }
 
-    /* disconnect */
+    // Disconnect from the broker
     printf("\n%s disconnecting from %s\n", argv[0], addr);
     sleep(1);
 
-    /* exit */
+    // Clean up and exit
     exit_example(EXIT_SUCCESS, sockfd, &client_daemon);
 }
 
+/**
+ * @brief Closes the socket and cancels the refresher thread, then exits.
+ */
 void exit_example(int status, int sockfd, pthread_t *client_daemon)
 {
     if (sockfd != -1) close(sockfd);
@@ -140,19 +119,22 @@ void exit_example(int status, int sockfd, pthread_t *client_daemon)
     exit(status);
 }
 
-
-
+/**
+ * @brief Callback for received PUBLISH messages (unused in this example).
+ */
 void publish_callback(void** unused, struct mqtt_response_publish *published)
 {
-    /* not used in this example */
+    /* Not used in this example */
 }
 
+/**
+ * @brief Handles periodic MQTT traffic processing.
+ */
 void* client_refresher(void* client)
 {
-    while(1)
-    {
+    while (1) {
         mqtt_sync((struct mqtt_client*) client);
-        usleep(100000U);
+        usleep(100000U); // Refresh every 100 ms
     }
     return NULL;
 }
