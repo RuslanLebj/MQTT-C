@@ -26,6 +26,9 @@ bin/bio_%: examples/bio_%.c $(MQTT_C_SOURCES)
 bin/openssl_%: examples/openssl_%.c $(MQTT_C_SOURCES)
 	$(CC) $(CFLAGS) `pkg-config --cflags openssl` -D MQTT_USE_BIO $^ -lpthread $(MSFLAGS) `pkg-config --libs openssl` -o $@
 
+bin/mosquitto_%: examples/simple_%.c $(MQTT_C_SOURCES)
+	$(CC) $(CFLAGS) $^ -lpthread $(MSFLAGS) -o $@
+
 $(BINDIR):
 	mkdir -p $(BINDIR)
 
